@@ -91,19 +91,23 @@
 git clone https://github.com/halfwaystudent/douyin-sparkflow.git
 cd douyin-sparkflow
 
-# 2. 创建本地环境变量
+# 2. 检查 Docker 架构（arm64/aarch64 服务器应输出 arm64）
+docker version --format '{{.Server.Arch}}'
+uname -m
+
+# 3. 创建本地环境变量
 cp .env.example .env
 nano .env  # 根据需要修改配置
 # 可选：在本地 .env 中填写 PROXY_SUB_URL，不要提交真实订阅地址
 
-# 3. 初始化运行时文件并启动服务
+# 4. 初始化运行时文件并启动服务
 # 会创建 proxy/config.yaml；没有订阅时使用 DIRECT-only 配置
 bash ./deploy/install-local.sh
 
 # Windows PowerShell 使用：
 # powershell -ExecutionPolicy Bypass -File .\deploy\install-local.ps1
 
-# 4. 访问 Web 界面
+# 5. 访问 Web 界面
 # 浏览器打开 http://localhost:8787
 ```
 
@@ -247,8 +251,13 @@ LOGIN_DESKTOP_PROXY=http://proxy:7890
 PROXY_BIND_ADDRESS=127.0.0.1
 PROXY_HTTP_PORT=7890
 PROXY_CONTROLLER_PORT=9090
+PROXY_IMAGE=metacubex/mihomo:latest
 # 可选：Mihomo/Clash 订阅地址。通常包含敏感 token，只写入本地 .env。
 PROXY_SUB_URL=
+
+# 多架构默认镜像（amd64/arm64）
+PLAYWRIGHT_BASE_IMAGE=mcr.microsoft.com/playwright/python:v1.56.0-jammy
+NODE_RUNTIME_IMAGE=node:22-bookworm-slim
 ```
 
 
@@ -325,6 +334,32 @@ docker compose logs -f
 # 4. 停止服务
 docker compose down
 ```
+
+#### ARM64 / aarch64 部署说明
+
+`deploy/install-local.sh` 与 `deploy/install-server.sh` 会先检测 Docker 架构并预检镜像清单，避免默认拉取不兼容镜像导致 `/bin/sh: exec format error`。在 ARM64 主机上，如果检测到旧的 amd64-only Playwright 镜像配置，会自动切换到多架构默认镜像。
+
+```bash
+# 在仓库根目录执行
+docker version --format '{{.Server.Arch}}'
+uname -m
+
+# 推荐：确保 .env 使用多架构默认值
+grep -E '^(PLAYWRIGHT_BASE_IMAGE|NODE_RUNTIME_IMAGE|PROXY_IMAGE)=' .env
+
+# 重新构建并启动
+bash ./deploy/install-local.sh
+```
+
+如预检提示镜像不支持 `linux/arm64`，请先在 `.env` 指定支持 ARM64 的镜像后重试。仅在必须兼容 amd64-only 镜像时，再使用 emulation fallback（性能明显下降）：
+
+```bash
+docker run --privileged --rm tonistiigi/binfmt --install amd64
+export DOCKER_DEFAULT_PLATFORM=linux/amd64
+bash ./deploy/install-local.sh
+```
+
+> 说明：本仓库在当前开发环境中已完成静态检查与 Compose 配置校验；未在真实 ARM64 服务器完成全链路运行验证，请在你的 ARM64 主机按上面命令实测并反馈日志。
 
 #### 仅部署 Web 服务
 
@@ -403,6 +438,14 @@ mode: rule
 如果宿主机 Docker Engine 较旧，Web 容器中的 Docker 运维功能可能需要显式指定
 `DOCKER_API_VERSION`。默认留空即可；只有确认宿主机 API 版本后，才在 `.env` 中设置，
 例如 `DOCKER_API_VERSION=1.43`。
+
+若需要排查 ARM64 构建失败，先执行：
+
+```bash
+docker compose config -q
+docker compose build --no-cache web
+docker compose logs --tail=200 web login-desktop scheduler proxy
+```
 
 
 ### 默认网络安全

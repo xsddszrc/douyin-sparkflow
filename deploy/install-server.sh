@@ -6,6 +6,10 @@ BRANCH="${BRANCH:-main}"
 APP_ROOT="${APP_ROOT:-/opt/douyin-sparkflow}"
 ACTION="${ACTION:-install}"
 DEFAULT_SCHEDULE="${DEFAULT_SCHEDULE:-10:00-18:00/20m}"
+PLAYWRIGHT_IMAGE_DEFAULT="mcr.microsoft.com/playwright/python:v1.56.0-jammy"
+PLAYWRIGHT_IMAGE_LEGACY_MIRROR="swr.cn-north-4.myhuaweicloud.com/ddn-k8s/mcr.microsoft.com/playwright/python:v1.56.0-jammy"
+NODE_RUNTIME_IMAGE_DEFAULT="node:22-bookworm-slim"
+PROXY_IMAGE_DEFAULT="metacubex/mihomo:latest"
 
 if [ "$(id -u)" -ne 0 ]; then
   SUDO="sudo"
@@ -130,6 +134,107 @@ read_env_value() {
   grep -E "^${key}=" "$file" | tail -n 1 | cut -d= -f2- || true
 }
 
+normalize_arch() {
+  case "$1" in
+    x86_64 | amd64) echo "amd64" ;;
+    aarch64 | arm64 | arm64v8) echo "arm64" ;;
+    armv7l | armv7 | armhf) echo "arm/v7" ;;
+    *) echo "$1" ;;
+  esac
+}
+
+detect_host_arch() {
+  local docker_arch
+  docker_arch="$(run_root docker version --format '{{.Server.Arch}}' 2>/dev/null || true)"
+  if [ -z "$docker_arch" ]; then
+    docker_arch="$(uname -m)"
+  fi
+  normalize_arch "$docker_arch"
+}
+
+resolve_effective_env() {
+  local key="$1"
+  local default_value="$2"
+  local env_file="$APP_ROOT/.env"
+  local from_file
+  from_file="$(read_env_value "$env_file" "$key")"
+  if [ -n "${!key:-}" ]; then
+    printf '%s' "${!key}"
+  elif [ -n "$from_file" ]; then
+    printf '%s' "$from_file"
+  else
+    printf '%s' "$default_value"
+  fi
+}
+
+manifest_supports_arch() {
+  local image="$1"
+  local host_arch="$2"
+  local inspect_out
+  if ! inspect_out="$(run_root docker buildx imagetools inspect "$image" 2>/dev/null)"; then
+    return 2
+  fi
+  if printf '%s\n' "$inspect_out" | grep -Eq "Platform:[[:space:]]+linux/${host_arch}([[:space:]]|/|$)"; then
+    return 0
+  fi
+  return 1
+}
+
+validate_manifest_or_exit() {
+  local component="$1"
+  local image="$2"
+  local host_arch="$3"
+  local rc=0
+  manifest_supports_arch "$image" "$host_arch" || rc=$?
+  case "$rc" in
+    0)
+      return 0
+      ;;
+    1)
+      echo "Image '$image' for component '$component' does not publish linux/$host_arch." >&2
+      echo "Set a compatible image in $APP_ROOT/.env and retry. Example:" >&2
+      echo "  PLAYWRIGHT_BASE_IMAGE=$PLAYWRIGHT_IMAGE_DEFAULT" >&2
+      echo "  NODE_RUNTIME_IMAGE=$NODE_RUNTIME_IMAGE_DEFAULT" >&2
+      echo "  PROXY_IMAGE=$PROXY_IMAGE_DEFAULT" >&2
+      if [ "$host_arch" = "arm64" ]; then
+        echo "Fallback (slower, compatibility mode): enable amd64 emulation and force linux/amd64 builds." >&2
+        echo "  docker run --privileged --rm tonistiigi/binfmt --install amd64" >&2
+        echo "  export DOCKER_DEFAULT_PLATFORM=linux/amd64" >&2
+      fi
+      exit 1
+      ;;
+    2)
+      log "Warning: cannot inspect image manifest for '$component' ($image); continuing without architecture precheck."
+      ;;
+  esac
+}
+
+ensure_arch_aware_defaults() {
+  local env_file="$APP_ROOT/.env"
+  local host_arch="$1"
+  local playwright_from_file
+  playwright_from_file="$(read_env_value "$env_file" "PLAYWRIGHT_BASE_IMAGE")"
+  if [ "$host_arch" = "arm64" ] \
+    && [ -z "${PLAYWRIGHT_BASE_IMAGE:-}" ] \
+    && { [ -z "$playwright_from_file" ] || [ "$playwright_from_file" = "$PLAYWRIGHT_IMAGE_LEGACY_MIRROR" ]; }; then
+    set_env_value "$env_file" "PLAYWRIGHT_BASE_IMAGE" "$PLAYWRIGHT_IMAGE_DEFAULT"
+    log "Detected ARM64 host, switched PLAYWRIGHT_BASE_IMAGE to multi-arch default."
+  fi
+}
+
+preflight_image_architecture() {
+  local host_arch="$1"
+  local playwright_image node_image proxy_image
+  playwright_image="$(resolve_effective_env PLAYWRIGHT_BASE_IMAGE "$PLAYWRIGHT_IMAGE_DEFAULT")"
+  node_image="$(resolve_effective_env NODE_RUNTIME_IMAGE "$NODE_RUNTIME_IMAGE_DEFAULT")"
+  proxy_image="$(resolve_effective_env PROXY_IMAGE "$PROXY_IMAGE_DEFAULT")"
+  log "Detected Docker architecture: $host_arch"
+  log "Preflight image compatibility check for linux/$host_arch"
+  validate_manifest_or_exit "playwright-base" "$playwright_image" "$host_arch"
+  validate_manifest_or_exit "node-runtime" "$node_image" "$host_arch"
+  validate_manifest_or_exit "proxy" "$proxy_image" "$host_arch"
+}
+
 remove_legacy_host_cron() {
   local current_file filtered_file backup_dir backup_file
   current_file="$(mktemp)"
@@ -190,7 +295,7 @@ prepare_runtime_files() {
   set_env_value "$env_file" "APP_ROOT" "$APP_ROOT"
   set_env_value "$env_file" "DEFAULT_SCHEDULE" "$DEFAULT_SCHEDULE"
 
-  for key in TZ WEB_BIND_ADDRESS WEB_PORT SPARKFLOW_SESSION_COOKIE_SECURE DOCKER_API_VERSION LOGIN_DESKTOP_BIND_ADDRESS LOGIN_DESKTOP_WEB_PORT LOGIN_DESKTOP_PUBLIC_URL PROXY_BIND_ADDRESS PROXY_HTTP_PORT PROXY_CONTROLLER_PORT PROXY_SUB_URL PROXY_USER_AGENT PLAYWRIGHT_BASE_IMAGE NODE_RUNTIME_IMAGE HTTP_PROXY_BUILD HTTPS_PROXY_BUILD ALL_PROXY_BUILD PIP_INDEX_URL PIP_TRUSTED_HOST; do
+  for key in TZ WEB_BIND_ADDRESS WEB_PORT SPARKFLOW_SESSION_COOKIE_SECURE DOCKER_API_VERSION LOGIN_DESKTOP_BIND_ADDRESS LOGIN_DESKTOP_WEB_PORT LOGIN_DESKTOP_PUBLIC_URL PROXY_BIND_ADDRESS PROXY_HTTP_PORT PROXY_CONTROLLER_PORT PROXY_SUB_URL PROXY_USER_AGENT PROXY_IMAGE PLAYWRIGHT_BASE_IMAGE NODE_RUNTIME_IMAGE HTTP_PROXY_BUILD HTTPS_PROXY_BUILD ALL_PROXY_BUILD PIP_INDEX_URL PIP_TRUSTED_HOST; do
     if [ -n "${!key:-}" ]; then
       set_env_value "$env_file" "$key" "${!key}"
     fi
@@ -223,8 +328,12 @@ prepare_runtime_files() {
 
 compose_up() {
   cd "$APP_ROOT"
+  local host_arch
+  host_arch="$(detect_host_arch)"
+  ensure_arch_aware_defaults "$host_arch"
   log "Refreshing proxy configuration"
   run_root bash "$APP_ROOT/refresh_proxy.sh"
+  preflight_image_architecture "$host_arch"
   log "Starting proxy container first"
   run_root env DOCKER_BUILDKIT=1 COMPOSE_DOCKER_CLI_BUILD=1 docker compose up -d proxy
   log "Waiting for proxy to be reachable on 127.0.0.1:7890"

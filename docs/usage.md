@@ -89,6 +89,24 @@ docker compose exec login-desktop curl -fsS http://127.0.0.1:18090/preflight
 
 如果直连遇到网络问题，再在「系统设置」中选择 Mihomo 并填写代理地址。未配置 Mihomo 不会影响默认直连模式。
 
+### ARM64/aarch64 上构建失败（`exec format error`）
+
+先检查 Docker 服务器架构和镜像配置：
+
+```bash
+docker version --format '{{.Server.Arch}}'
+uname -m
+grep -E '^(PLAYWRIGHT_BASE_IMAGE|NODE_RUNTIME_IMAGE|PROXY_IMAGE)=' .env
+```
+
+再执行部署脚本（会自动做镜像架构预检）：
+
+```bash
+bash ./deploy/install-local.sh
+```
+
+如果脚本提示镜像不支持 `linux/arm64`，按提示修改 `.env` 后重试；仅在必须运行 amd64-only 镜像时，才使用 `DOCKER_DEFAULT_PLATFORM=linux/amd64` 兼容模式（更慢、资源占用更高）。
+
 ### 账号保存后没有好友列表
 
 进入 **账号与目标**，点击 **刷新好友列表**。刷新需要当前账号的登录态有效，如果登录态过期，回到 **登录工作区** 重新登录并保存。
