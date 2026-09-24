@@ -149,9 +149,29 @@ class DeploymentContractTests(unittest.TestCase):
         self.assertIn("FROM ${NODE_RUNTIME_IMAGE} AS node-runtime", dockerfile)
         self.assertIn("FROM ${PLAYWRIGHT_BASE_IMAGE}", dockerfile)
         self.assertIn("COPY --from=node-runtime /usr/local/bin/node", dockerfile)
+        self.assertIn("SparkFlow build target", dockerfile)
         self.assertIn("docker.io", dockerfile)
         self.assertIn("node --version", dockerfile)
         self.assertNotIn("github.com/docker/compose", dockerfile)
+
+    def test_compose_and_env_defaults_are_multi_arch_safe(self):
+        compose = (REPO_ROOT / "docker-compose.yml").read_text(encoding="utf-8")
+        env_example = (REPO_ROOT / ".env.example").read_text(encoding="utf-8")
+        self.assertIn("image: ${PROXY_IMAGE:-metacubex/mihomo:latest}", compose)
+        self.assertIn(
+            "PLAYWRIGHT_BASE_IMAGE: ${PLAYWRIGHT_BASE_IMAGE:-mcr.microsoft.com/playwright/python:v1.56.0-jammy}",
+            compose,
+        )
+        self.assertIn("PROXY_IMAGE=metacubex/mihomo:latest", env_example)
+        self.assertIn("PLAYWRIGHT_BASE_IMAGE=mcr.microsoft.com/playwright/python:v1.56.0-jammy", env_example)
+
+    def test_installers_have_architecture_preflight_for_images(self):
+        local_installer = (REPO_ROOT / "deploy" / "install-local.sh").read_text(encoding="utf-8")
+        server_installer = (REPO_ROOT / "deploy" / "install-server.sh").read_text(encoding="utf-8")
+        for installer in (local_installer, server_installer):
+            self.assertIn("detect_host_arch", installer)
+            self.assertIn("docker buildx imagetools inspect", installer)
+            self.assertIn("DOCKER_DEFAULT_PLATFORM=linux/amd64", installer)
 
     def test_docker_build_context_excludes_runtime_data(self):
         dockerignore = (SOURCE_ROOT / ".dockerignore").read_text(encoding="utf-8")
